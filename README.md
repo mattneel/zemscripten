@@ -2,6 +2,18 @@
 
 Zig build package and shims for [Emscripten](https://emscripten.org) emsdk
 
+> **This is the [mattneel/zemscripten](https://github.com/mattneel/zemscripten) fork.**
+> It ports this package's `build.zig` to the build API of
+> [Zig++](https://github.com/mattneel/zigpp) on its `zigpp` branch: emsdk paths
+> and resources are propagated as `std.Build.LazyPath` values instead of
+> strings, so `emccPath`, `emrunPath` and `htmlPath` return `LazyPath`,
+> `emrunStep` takes the html path as a `LazyPath`, and `ResourceFile.get` is
+> gone. `build.zig` states the alteration.
+>
+> The `zigpp` branch folds in upstream `main` regularly, by merging (not
+> rebasing) `upstream/main`, and each sync is tagged with the next counter
+> (`zigpp.<n>`; the first is `zigpp.1`).
+
 ## How to use it
 
 Add `zemscripten` and (optionally) `emsdk` to your build.zig.zon dependencies
@@ -80,10 +92,16 @@ You can also define a run step that invokes `emrun`. This will serve the html lo
 ```zig
     const html_filename = try std.fmt.allocPrint(b.allocator, "{s}.html", .{wasm.name});
 
+    // Zig++: the html path is a LazyPath relative to the install prefix.
+    const html_path: std.Build.LazyPath = .{ .relative = .{
+        .base = .install_prefix,
+        .sub_path = try std.fs.path.join(b.allocator, &.{ "web", html_filename }),
+    } };
+
     const emrun_args = .{};
     const emrun_step = @import("zemscripten").emrunStep(
         b,
-        b.getInstallPath(.{ .custom = "web" }, html_filename),
+        html_path,
         &emrun_args,
     );
 

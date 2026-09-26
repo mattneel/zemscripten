@@ -1,3 +1,8 @@
+// ALTERED FOR ZIG++: https://github.com/mattneel/zemscripten is a fork of
+// https://github.com/zig-gamedev/zemscripten whose build script is ported to
+// Zig++'s (https://github.com/mattneel/zigpp) `std.Build` API: `LazyPath.getPath`
+// is gone, so emsdk paths and resources are propagated as `std.Build.LazyPath`
+// values instead of strings.
 const builtin = @import("builtin");
 const std = @import("std");
 
@@ -10,97 +15,103 @@ pub fn build(b: *std.Build) void {
     _ = b.addModule("root", .{ .root_source_file = b.path("src/zemscripten.zig") });
 }
 
-pub fn emccPath(b: *std.Build) []const u8 {
-    return std.fs.path.join(b.allocator, &.{
-        b.dependency("emsdk", .{}).path("").getPath(b),
-        "upstream",
-        "emscripten",
-        "emcc.py",
-    }) catch unreachable;
+/// Returns a lazy path to a path within the `emsdk` dependency.
+fn emsdkPath(b: *std.Build, sub_path: []const u8) std.Build.LazyPath {
+    return b.dependency("emsdk", .{}).path("").path(b, sub_path);
 }
 
-pub fn emrunPath(b: *std.Build) []const u8 {
-    return std.fs.path.join(b.allocator, &.{
-        b.dependency("emsdk", .{}).path("").getPath(b),
-        "upstream",
-        "emscripten",
-        switch (builtin.target.os.tag) {
-            .windows => "emrun.bat",
-            else => "emrun",
-        },
-    }) catch unreachable;
+pub fn emccPath(b: *std.Build) std.Build.LazyPath {
+    return emsdkPath(b, "upstream/emscripten/emcc.py");
 }
 
-pub fn htmlPath(b: *std.Build) []const u8 {
-    return std.fs.path.join(b.allocator, &.{
-        b.dependency("emsdk", .{}).path("").getPath(b),
-        "upstream",
-        "emscripten",
-        "src",
-        "shell.html",
-    }) catch unreachable;
+pub fn emrunPath(b: *std.Build) std.Build.LazyPath {
+    return emsdkPath(b, switch (builtin.target.os.tag) {
+        .windows => "upstream/emscripten/emrun.bat",
+        else => "upstream/emscripten/emrun",
+    });
+}
+
+pub fn htmlPath(b: *std.Build) std.Build.LazyPath {
+    return emsdkPath(b, "upstream/emscripten/src/shell.html");
+}
+
+/// Runs a system command whose argv[0] is `program` (an emsdk script inside the
+/// `emsdk` dependency), followed by `args`.
+fn addEmsdkCommand(b: *std.Build, program: std.Build.LazyPath, args: []const []const u8) *std.Build.Step.Run {
+    const run = std.Build.Step.Run.create(b, b.fmt("emsdk {s}", .{args[0]}));
+    run.addFileArg(program);
+    run.addArgs(args);
+    return run;
 }
 
 pub fn activateEmsdkStep(b: *std.Build) *std.Build.Step {
-    const emsdk_script_path = std.fs.path.join(b.allocator, &.{
-        b.dependency("emsdk", .{}).path("").getPath(b),
-        switch (builtin.target.os.tag) {
-            .windows => "emsdk.bat",
-            else => "emsdk",
-        },
-    }) catch unreachable;
+    const emsdk_script_path = emsdkPath(b, switch (builtin.target.os.tag) {
+        .windows => "emsdk.bat",
+        else => "emsdk",
+    });
 
-    var emsdk_update = b.addSystemCommand(&.{ emsdk_script_path, "update" });
+    const emsdk_update = addEmsdkCommand(b, emsdk_script_path, &.{"update"});
 
-    var emsdk_install = b.addSystemCommand(&.{ emsdk_script_path, "install", emsdk_version });
+    const emsdk_install = addEmsdkCommand(b, emsdk_script_path, &.{ "install", emsdk_version });
     emsdk_install.step.dependOn(&emsdk_update.step);
 
     switch (builtin.target.os.tag) {
         .linux, .macos => {
-            emsdk_install.step.dependOn(&b.addSystemCommand(&.{ "chmod", "+x", emsdk_script_path }).step);
+            const chmod_emsdk = b.addSystemCommand(&.{ "chmod", "a+x" });
+            chmod_emsdk.addFileArg(emsdk_script_path);
+            emsdk_install.step.dependOn(&chmod_emsdk.step);
         },
         .windows => {
-            emsdk_install.step.dependOn(&b.addSystemCommand(&.{ "takeown", "/f", emsdk_script_path }).step);
+            const takeown_emsdk = b.addSystemCommand(&.{ "takeown", "/f" });
+            takeown_emsdk.addFileArg(emsdk_script_path);
+            emsdk_install.step.dependOn(&takeown_emsdk.step);
         },
         else => {},
     }
 
-    var emsdk_activate = b.addSystemCommand(&.{ emsdk_script_path, "activate", emsdk_version });
+    const emsdk_activate = addEmsdkCommand(b, emsdk_script_path, &.{ "activate", emsdk_version });
     emsdk_activate.step.dependOn(&emsdk_install.step);
 
-    const step = b.allocator.create(std.Build.Step) catch unreachable;
-    step.* = std.Build.Step.init(.{
-        .id = .custom,
-        .name = "Activate EMSDK",
-        .owner = b,
-        .makeFn = &struct {
-            fn make(_: *std.Build.Step, _: std.Build.Step.MakeOptions) anyerror!void {}
-        }.make,
-    });
+    // A no-op aggregator step; the Zig++ build API has no user-defined step
+    // callbacks, so use the same `top_level` step type the install/uninstall
+    // steps use.
+    const step = b.allocator.create(std.Build.Step.TopLevel) catch @panic("OOM");
+    step.* = .{
+        .step = std.Build.Step.init(.{
+            .tag = .top_level,
+            .name = "Activate EMSDK",
+            .owner = b,
+        }),
+        .description = "Activate EMSDK",
+    };
 
     switch (builtin.target.os.tag) {
         .linux, .macos => {
-            const chmod_emcc = b.addSystemCommand(&.{ "chmod", "a+x", emccPath(b) });
+            const chmod_emcc = b.addSystemCommand(&.{ "chmod", "a+x" });
+            chmod_emcc.addFileArg(emccPath(b));
             chmod_emcc.step.dependOn(&emsdk_activate.step);
-            step.dependOn(&chmod_emcc.step);
+            step.step.dependOn(&chmod_emcc.step);
 
-            const chmod_emrun = b.addSystemCommand(&.{ "chmod", "a+x", emrunPath(b) });
+            const chmod_emrun = b.addSystemCommand(&.{ "chmod", "a+x" });
+            chmod_emrun.addFileArg(emrunPath(b));
             chmod_emrun.step.dependOn(&emsdk_activate.step);
-            step.dependOn(&chmod_emrun.step);
+            step.step.dependOn(&chmod_emrun.step);
         },
         .windows => {
-            const takeown_emcc = b.addSystemCommand(&.{ "takeown", "/f", emccPath(b) });
+            const takeown_emcc = b.addSystemCommand(&.{ "takeown", "/f" });
+            takeown_emcc.addFileArg(emccPath(b));
             takeown_emcc.step.dependOn(&emsdk_activate.step);
-            step.dependOn(&takeown_emcc.step);
+            step.step.dependOn(&takeown_emcc.step);
 
-            const takeown_emrun = b.addSystemCommand(&.{ "takeown", "/f", emrunPath(b) });
+            const takeown_emrun = b.addSystemCommand(&.{ "takeown", "/f" });
+            takeown_emrun.addFileArg(emrunPath(b));
             takeown_emrun.step.dependOn(&emsdk_activate.step);
-            step.dependOn(&takeown_emrun.step);
+            step.step.dependOn(&takeown_emrun.step);
         },
         else => {},
     }
 
-    return step;
+    return &step.step;
 }
 
 pub const EmccFlags = std.StringHashMap(void);
@@ -170,16 +181,6 @@ pub fn emccDefaultSettings(allocator: std.mem.Allocator, options: EmccDefaultSet
 pub const ResourceFile = struct {
     src_path: std.Build.LazyPath,
     virtual_path: ?[]const u8 = null,
-
-    pub fn get(self: ResourceFile, b: *std.Build) []const u8 {
-        return if (self.virtual_path) |virtual_path|
-            b.fmt(
-                "{s}@{s}",
-                .{ self.src_path.getPath(b), virtual_path },
-            )
-        else
-            self.src_path.getPath(b);
-    }
 };
 
 pub const StepOptions = struct {
@@ -201,7 +202,8 @@ pub fn emccStep(
     compile_steps: []const *std.Build.Step.Compile,
     options: StepOptions,
 ) *std.Build.Step {
-    var emcc = b.addSystemCommand(&.{emccPath(b)});
+    const emcc = std.Build.Step.Run.create(b, "emcc");
+    emcc.addFileArg(emccPath(b));
 
     var iterFlags = options.flags.iterator();
     while (iterFlags.next()) |kvp| {
@@ -250,14 +252,14 @@ pub fn emccStep(
     if (options.embed_paths) |embed_paths| {
         for (embed_paths) |path| {
             emcc.addArg("--embed-file");
-            emcc.addFileArg(path.src_path);
+            addResourceFileArg(b, emcc, path);
         }
     }
 
     if (options.preload_paths) |preload_paths| {
         for (preload_paths) |path| {
             emcc.addArg("--preload-file");
-            emcc.addFileArg(path.src_path);
+            addResourceFileArg(b, emcc, path);
         }
     }
 
@@ -281,14 +283,26 @@ pub fn emccStep(
     return &install_step.step;
 }
 
+/// Passes `resource.src_path` as a command line argument, appending
+/// `@<virtual_path>` when the resource names one (emcc's syntax for embedding
+/// or preloading a file at a path inside the virtual file system).
+fn addResourceFileArg(b: *std.Build, run: *std.Build.Step.Run, resource: ResourceFile) void {
+    if (resource.virtual_path) |virtual_path| {
+        run.addFileArg2(resource.src_path, .{ .suffix = b.fmt("@{s}", .{virtual_path}) });
+    } else {
+        run.addFileArg(resource.src_path);
+    }
+}
+
 pub fn emrunStep(
     b: *std.Build,
-    html_path: []const u8,
+    html_path: std.Build.LazyPath,
     extra_args: []const []const u8,
 ) *std.Build.Step {
-    var emrun = b.addSystemCommand(&.{emrunPath(b)});
+    const emrun = std.Build.Step.Run.create(b, "emrun");
+    emrun.addFileArg(emrunPath(b));
     emrun.addArgs(extra_args);
-    emrun.addArg(html_path);
+    emrun.addFileArg(html_path);
     // emrun.addArg("--");
 
     return &emrun.step;
