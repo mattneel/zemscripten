@@ -10,9 +10,9 @@ Zig build package and shims for [Emscripten](https://emscripten.org) emsdk
 > `emrunStep` takes the html path as a `LazyPath`, and `ResourceFile.get` is
 > gone. `build.zig` states the alteration.
 >
-> The `zigpp` branch folds in upstream `main` regularly, by merging (not
-> rebasing) `upstream/main`, and each sync is tagged with the next counter
-> (`zigpp.<n>`; the first is `zigpp.1`).
+> Following Zig++'s "Live at Head" versioning, the `zigpp` branch carries no
+> tags: it folds in upstream `main` regularly by merging (not rebasing)
+> `upstream/main`, and a consumer pins a commit of it.
 
 ## How to use it
 
